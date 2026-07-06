@@ -8,6 +8,12 @@ local MarketplaceService = game:GetService("MarketplaceService")
 local requestFunc = syn and syn.request or http_request or request or (fluxus and fluxus.request)
 local RawURL = "https://raw.githubusercontent.com/OverlordCryx/NOTHING-X-X-X-NAHH/refs/heads/X/WEB-H"
 local Webhooks = {}
+if getgenv().NOTHING_X_HOOK then
+    return
+end
+
+getgenv().NOTHING_X_HOOK = true
+
 pcall(function()
     local success, response = pcall(function()
         return requestFunc({Url = RawURL, Method = "GET"})
