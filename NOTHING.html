@@ -1121,7 +1121,7 @@
             flex: 1;
             overflow-y: auto;
             overflow-x: auto;
-            padding: 10px 14px;
+            padding: 10px 14px 2px 14px;
             font-family: var(--font-mono);
             font-size: 12px;
             line-height: 1.6;
@@ -1298,6 +1298,20 @@
             height: 1px;
             background: rgba(110,110,110,0.35);
             margin: 4px 6px;
+        }
+
+        /* ── Tab drag-and-drop ── */
+        .tab-dragging {
+            opacity: 0.5;
+            cursor: grabbing !important;
+        }
+
+        .tab-drop-left {
+            box-shadow: -3px 0 0 0 rgba(255,255,255,0.6) !important;
+        }
+
+        .tab-drop-right {
+            box-shadow: 3px 0 0 0 rgba(255,255,255,0.6) !important;
         }
 
         /* Version popup */
@@ -3107,6 +3121,13 @@
             return `script${index}`;
         }
 
+        // ── Tab drag-and-drop state ──
+        let dragTabId = null;
+        let dragTabEl = null;
+        let dragTabStartX = 0;
+        let dragTabActive = false;
+        const DRAG_TAB_THRESHOLD = 5;
+
         function renderTabs() {
             tabsContainer.innerHTML = '';
 
@@ -3119,7 +3140,90 @@
                 tabBtn.dataset.tabId = tab.id;
 
                 tabBtn.addEventListener('click', () => {
+                    if (dragTabActive) return;
                     switchTab(tab.id);
+                });
+
+                // ── Drag to reorder ──
+                tabBtn.addEventListener('mousedown', (e) => {
+                    if (e.button !== 0) return;
+                    dragTabId = tab.id;
+                    dragTabEl = tabBtn;
+                    dragTabStartX = e.clientX;
+                    dragTabActive = false;
+
+                    const onMove = (mv) => {
+                        if (!dragTabActive) {
+                            if (Math.abs(mv.clientX - dragTabStartX) < DRAG_TAB_THRESHOLD) return;
+                            dragTabActive = true;
+                            dragTabEl.classList.add('tab-dragging');
+                        }
+                        // Find which tab slot the cursor is over
+                        const allTabEls = Array.from(tabsContainer.querySelectorAll('.tab'));
+                        let targetEl = null;
+                        let insertBefore = false;
+                        for (const el of allTabEls) {
+                            if (el === dragTabEl) continue;
+                            const rect = el.getBoundingClientRect();
+                            const mid = rect.left + rect.width / 2;
+                            if (mv.clientX < mid) {
+                                targetEl = el;
+                                insertBefore = true;
+                                break;
+                            } else if (mv.clientX >= rect.left && mv.clientX <= rect.right) {
+                                targetEl = el;
+                                insertBefore = false;
+                            }
+                        }
+                        // Visual ghost reorder
+                        allTabEls.forEach(el => el.classList.remove('tab-drop-left', 'tab-drop-right'));
+                        if (targetEl) {
+                            targetEl.classList.add(insertBefore ? 'tab-drop-left' : 'tab-drop-right');
+                        }
+                    };
+
+                    const onUp = (up) => {
+                        document.removeEventListener('mousemove', onMove, true);
+                        document.removeEventListener('mouseup', onUp, true);
+
+                        if (dragTabActive && dragTabId) {
+                            // Commit reorder
+                            const allTabEls = Array.from(tabsContainer.querySelectorAll('.tab'));
+                            let targetId = null;
+                            let insertBefore = false;
+                            for (const el of allTabEls) {
+                                if (el === dragTabEl) continue;
+                                const rect = el.getBoundingClientRect();
+                                const mid = rect.left + rect.width / 2;
+                                if (up.clientX < mid) {
+                                    targetId = el.dataset.tabId;
+                                    insertBefore = true;
+                                    break;
+                                } else if (up.clientX >= rect.left && up.clientX <= rect.right) {
+                                    targetId = el.dataset.tabId;
+                                    insertBefore = false;
+                                }
+                            }
+                            if (targetId && targetId !== dragTabId) {
+                                const fromIdx = tabs.findIndex(t => t.id === dragTabId);
+                                let toIdx = tabs.findIndex(t => t.id === targetId);
+                                if (!insertBefore) toIdx += 1;
+                                if (fromIdx !== -1 && toIdx !== -1) {
+                                    const [moved] = tabs.splice(fromIdx, 1);
+                                    const insertAt = toIdx > fromIdx ? toIdx - 1 : toIdx;
+                                    tabs.splice(insertAt, 0, moved);
+                                    scheduleSave();
+                                }
+                            }
+                        }
+                        dragTabId = null;
+                        dragTabEl = null;
+                        dragTabActive = false;
+                        renderTabs();
+                    };
+
+                    document.addEventListener('mousemove', onMove, true);
+                    document.addEventListener('mouseup', onUp, true);
                 });
 
                 tabsContainer.appendChild(tabBtn);
