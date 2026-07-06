@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://cdnjs.cloudflare.com">
     <link rel="preconnect" href="https://cdn.fluenticon.com">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.33.0/min/vs/loader.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.53.0/min/vs/loader.min.js"></script>
 	<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
     <style>
         :root {
@@ -3186,7 +3186,9 @@
                         document.removeEventListener('mousemove', onMove, true);
                         document.removeEventListener('mouseup', onUp, true);
 
-                        if (dragTabActive && dragTabId) {
+                        const wasDragging = dragTabActive;
+
+                        if (wasDragging && dragTabId) {
                             // Commit reorder
                             const allTabEls = Array.from(tabsContainer.querySelectorAll('.tab'));
                             let targetId = null;
@@ -3215,11 +3217,14 @@
                                     scheduleSave();
                                 }
                             }
+                            // Only re-render after a real drag — for plain clicks
+                            // the click event fires next and switchTab() renders.
+                            renderTabs();
                         }
+
                         dragTabId = null;
                         dragTabEl = null;
                         dragTabActive = false;
-                        renderTabs();
                     };
 
                     document.addEventListener('mousemove', onMove, true);
@@ -3456,7 +3461,7 @@
                     throw new Error('Require.js not loaded');
                 }
 
-                require.config({ paths: { vs: 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.33.0/min/vs' } });
+                require.config({ paths: { vs: 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.53.0/min/vs' } });
                 require(['vs/editor/editor.main'], function () {
                     try {
                         // Register fresh 'luau' language — no conflict with Monaco's built-in lua tokenizer
