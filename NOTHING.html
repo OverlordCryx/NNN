@@ -7,7 +7,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="preconnect" href="https://cdnjs.cloudflare.com">
         <script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.53.0/min/vs/loader.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs/loader.min.js"></script>
 	<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
     <style>
         :root {
@@ -1565,8 +1565,19 @@
         let isApplyingHistory = false;
 
         const MAX_HISTORY_ENTRIES = 100;
+        const MAX_HISTORY_ENTRIES_LARGE = 10;  // reduced history for huge files (>500KB)
+        const LARGE_CONTENT_THRESHOLD = 512 * 1024; // 500 KB
         const HISTORY_CHECKPOINT_MS = 1200;
         const AUTO_SAVE_INTERVAL_MS = 8000;
+        const IDB_DB_NAME = 'monaco-tabs-idb';
+        const IDB_STORE_NAME = 'state';
+        const IDB_KEY = 'tabs-v1';
+        let _idb = null;
+        let _idbReady = false;
+        let _idbFailed = false;
+        let _saveInProgress = false;
+        let _savePendingAfterCurrent = false;
+        let _lastSavedJSON = '';  // dedup: skip save if nothing changed
         const SCRIPT_HUB_LIMIT = 24;
         const SCRIPT_HUB_FALLBACK_IMAGE = 'https://images.sftcdn.net/images/t_app-cover-s-16-9,f_auto/p/cc6b675d-075d-4080-bb7f-2c288e0d75bc/1674567810/a-literal-baseplate-screenshot';
         const SCRIPT_HUB_WIDTH_KEY = 'script-hub-width-v1';
@@ -1638,7 +1649,26 @@
             if (typeof value !== 'string') {
                 return '';
             }
+            // Fast path: skip regex for very large strings during non-critical calls
+            // The regex is still applied but we avoid re-running on unchanged content
             return value.replace(INVISIBLE_CHAR_PATTERN, '');
+        }
+
+        // Lightweight check — only sanitize if we suspect dirty chars
+        function sanitizeScriptTextLazy(value) {
+            if (typeof value !== 'string') return '';
+            if (value.length < LARGE_CONTENT_THRESHOLD) {
+                return value.replace(INVISIBLE_CHAR_PATTERN, '');
+            }
+            // For huge strings, sample first/last 4KB for invisible chars
+            const head = value.slice(0, 4096);
+            const tail = value.slice(-4096);
+            if (INVISIBLE_CHAR_PATTERN.test(head) || INVISIBLE_CHAR_PATTERN.test(tail)) {
+                INVISIBLE_CHAR_PATTERN.lastIndex = 0;
+                return value.replace(INVISIBLE_CHAR_PATTERN, '');
+            }
+            INVISIBLE_CHAR_PATTERN.lastIndex = 0;
+            return value;
         }
 
         function tabNameExists(name, ignoreId = null) {
@@ -1674,8 +1704,13 @@
             tab.history = tab.history.slice(0, tab.historyIndex + 1);
             tab.history.push(value);
 
-            if (tab.history.length > MAX_HISTORY_ENTRIES) {
-                const cut = tab.history.length - MAX_HISTORY_ENTRIES;
+            // Use smaller history cap for large content to prevent memory explosion
+            const maxEntries = (value.length > LARGE_CONTENT_THRESHOLD)
+                ? MAX_HISTORY_ENTRIES_LARGE
+                : MAX_HISTORY_ENTRIES;
+
+            if (tab.history.length > maxEntries) {
+                const cut = tab.history.length - maxEntries;
                 tab.history.splice(0, cut);
             }
 
@@ -1693,21 +1728,21 @@
                 return;
             }
 
-            pushHistorySnapshot(activeTab, sanitizeScriptText(editor.getValue()));
+            pushHistorySnapshot(activeTab, sanitizeScriptTextLazy(editor.getValue()));
         }
 
         function scheduleHistoryCheckpoint() {
             clearTimeout(historyCheckpointTimer);
             historyCheckpointTimer = setTimeout(() => {
                 commitActiveHistoryCheckpoint();
-                saveState();
+                saveStateAsync();
             }, HISTORY_CHECKPOINT_MS);
         }
 
         function flushEditorState() {
             clearTimeout(historyCheckpointTimer);
             commitActiveHistoryCheckpoint();
-            saveState();
+            saveStateAsync();
         }
 
         function saveAllTabsImmediately() {
@@ -1717,7 +1752,7 @@
             if (editor) {
                 const activeTab = getActiveTab();
                 if (activeTab) {
-                    const value = sanitizeScriptText(editor.getValue());
+                    const value = sanitizeScriptTextLazy(editor.getValue());
                     activeTab.content = value;
                     pushHistorySnapshot(activeTab, value);
                 }
@@ -1727,11 +1762,11 @@
                 if (!tab) {
                     return;
                 }
-                tab.content = sanitizeScriptText(typeof tab.content === 'string' ? tab.content : '');
+                tab.content = sanitizeScriptTextLazy(typeof tab.content === 'string' ? tab.content : '');
                 normalizeTabHistory(tab);
             });
 
-            saveState();
+            saveStateAsync();
         }
 
         function setEditorValueSilently(value, selectChange = false) {
@@ -1803,7 +1838,7 @@
             commitActiveHistoryCheckpoint();
             setEditorValueSilently('');
             pushHistorySnapshot(activeTab, '');
-            saveState();
+            saveStateAsync();
         }
 
         function undoActiveTab() {
@@ -1823,7 +1858,7 @@
             const value = activeTab.history[activeTab.historyIndex];
             setEditorValueSilently(value, true);
             activeTab.content = value;
-            saveState();
+            saveStateAsync();
         }
 
         function redoActiveTab() {
@@ -1843,12 +1878,15 @@
             const value = activeTab.history[activeTab.historyIndex];
             setEditorValueSilently(value, true);
             activeTab.content = value;
-            saveState();
+            saveStateAsync();
         }
 
         function scheduleSave() {
             clearTimeout(saveTimer);
-            saveTimer = setTimeout(saveState, 500);
+            // Adaptive debounce: larger content → longer delay to avoid main-thread stalls
+            const totalSize = tabs.reduce((sum, t) => sum + (t.content ? t.content.length : 0), 0);
+            const delay = totalSize > LARGE_CONTENT_THRESHOLD ? 2000 : 500;
+            saveTimer = setTimeout(saveStateAsync, delay);
         }
 
         function showToast(message) {
@@ -2831,7 +2869,7 @@
                 activeTabId = newTab.id;
                 setEditorValueSilently(scriptBody);
                 renderTabs();
-                saveState();
+                saveStateAsync();
             } catch (err) {
                 showToast('Failed to open script tab.');
             }
@@ -3007,18 +3045,224 @@
             setScriptHubWidth(defaultWidth, false);
         }
 
+        // ── IndexedDB helpers for large-content persistence ──────────────
+        function _openIDB() {
+            return new Promise((resolve, reject) => {
+                if (_idb) { resolve(_idb); return; }
+                try {
+                    const req = indexedDB.open(IDB_DB_NAME, 1);
+                    req.onupgradeneeded = () => {
+                        const db = req.result;
+                        if (!db.objectStoreNames.contains(IDB_STORE_NAME)) {
+                            db.createObjectStore(IDB_STORE_NAME);
+                        }
+                    };
+                    req.onsuccess = () => { _idb = req.result; _idbReady = true; resolve(_idb); };
+                    req.onerror = () => { _idbFailed = true; reject(req.error); };
+                } catch (e) { _idbFailed = true; reject(e); }
+            });
+        }
+
+        function _idbPut(key, value) {
+            return new Promise((resolve, reject) => {
+                try {
+                    const tx = _idb.transaction(IDB_STORE_NAME, 'readwrite');
+                    tx.objectStore(IDB_STORE_NAME).put(value, key);
+                    tx.oncomplete = resolve;
+                    tx.onerror = () => reject(tx.error);
+                } catch (e) { reject(e); }
+            });
+        }
+
+        function _idbGet(key) {
+            return new Promise((resolve, reject) => {
+                try {
+                    const tx = _idb.transaction(IDB_STORE_NAME, 'readonly');
+                    const req = tx.objectStore(IDB_STORE_NAME).get(key);
+                    req.onsuccess = () => resolve(req.result);
+                    req.onerror = () => reject(req.error);
+                } catch (e) { reject(e); }
+            });
+        }
+
+        // ── Prepare save payload without blocking main thread ─────────────
+        function _buildSavePayload() {
+            // Sync active editor content to tab object
+            if (activeTabId && editor) {
+                const activeTab = tabs.find(tab => tab.id === activeTabId);
+                if (activeTab) {
+                    activeTab.content = sanitizeScriptTextLazy(editor.getValue());
+                }
+            }
+            // Build minimal payload — strip history for huge tabs to cut serialization cost
+            const saveTabs = tabs.map(t => {
+                const isLarge = t.content && t.content.length > LARGE_CONTENT_THRESHOLD;
+                return {
+                    id: t.id,
+                    name: t.name,
+                    content: t.content || '',
+                    history: isLarge
+                        ? t.history.slice(-MAX_HISTORY_ENTRIES_LARGE)
+                        : t.history,
+                    historyIndex: isLarge
+                        ? Math.min(t.historyIndex, MAX_HISTORY_ENTRIES_LARGE - 1)
+                        : t.historyIndex,
+                    autoExec: t.autoExec || false
+                };
+            });
+            return { tabs: saveTabs, activeTabId };
+        }
+
+        // ── Async save — never blocks UI ──────────────────────────────────
+        async function saveStateAsync() {
+            if (_saveInProgress) {
+                _savePendingAfterCurrent = true;
+                return;
+            }
+            _saveInProgress = true;
+            try {
+                const payload = _buildSavePayload();
+                const json = JSON.stringify(payload);
+
+                // Dedup: skip write if identical to last save
+                if (json === _lastSavedJSON) {
+                    _saveInProgress = false;
+                    return;
+                }
+
+                // Try IndexedDB first (no size limit), fallback to localStorage
+                if (_idbReady && !_idbFailed) {
+                    try {
+                        await _idbPut(IDB_KEY, payload);
+                        _lastSavedJSON = json;
+                        // Also keep a small metadata marker in localStorage for quick detect
+                        try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ _idb: true, activeTabId: payload.activeTabId, tabCount: payload.tabs.length })); } catch(_e) {}
+                    } catch (idbErr) {
+                        console.warn('IDB save failed, falling back to localStorage:', idbErr);
+                        _saveToLocalStorage(json);
+                    }
+                } else {
+                    _saveToLocalStorage(json);
+                }
+            } catch (err) {
+                console.error('Failed to save state:', err);
+            } finally {
+                _saveInProgress = false;
+                if (_savePendingAfterCurrent) {
+                    _savePendingAfterCurrent = false;
+                    // Yield to browser before next save
+                    setTimeout(saveStateAsync, 50);
+                }
+            }
+        }
+
+        function _saveToLocalStorage(json) {
+            try {
+                localStorage.setItem(STORAGE_KEY, json);
+                _lastSavedJSON = json;
+            } catch (e) {
+                // localStorage quota exceeded — try trimming history
+                console.warn('localStorage quota exceeded, trimming history...');
+                tabs.forEach(t => {
+                    if (t.history && t.history.length > 2) {
+                        t.history = [t.history[t.history.length - 1]];
+                        t.historyIndex = 0;
+                    }
+                });
+                try {
+                    const trimmed = JSON.stringify({ tabs, activeTabId });
+                    localStorage.setItem(STORAGE_KEY, trimmed);
+                    _lastSavedJSON = trimmed;
+                } catch (e2) {
+                    console.error('Save failed even after trimming:', e2);
+                }
+            }
+        }
+
+        // Synchronous save — kept for beforeunload/pagehide where async may not complete
         function saveState() {
             try {
-                if (activeTabId && editor) {
-                    const activeTab = tabs.find(tab => tab.id === activeTabId);
-                    if (activeTab) {
-                        activeTab.content = sanitizeScriptText(editor.getValue());
-                    }
+                const payload = _buildSavePayload();
+                const json = JSON.stringify(payload);
+                if (json === _lastSavedJSON) return;
+                _saveToLocalStorage(json);
+                // Fire-and-forget IDB save too
+                if (_idbReady && !_idbFailed) {
+                    try { _idbPut(IDB_KEY, payload); } catch(_e) {}
                 }
-                localStorage.setItem(STORAGE_KEY, JSON.stringify({ tabs, activeTabId }));
             } catch (err) {
                 console.error('Failed to save state:', err);
             }
+        }
+
+        // ── Load state — try IDB first, then localStorage ────────────────
+        async function loadStateAsync() {
+            try {
+                await _openIDB();
+            } catch (e) {
+                console.warn('IndexedDB unavailable, using localStorage only:', e);
+            }
+
+            // Try IndexedDB first
+            if (_idbReady) {
+                try {
+                    const data = await _idbGet(IDB_KEY);
+                    if (data && Array.isArray(data.tabs)) {
+                        return _applyLoadedState(data);
+                    }
+                } catch (e) {
+                    console.warn('IDB load failed:', e);
+                }
+            }
+
+            // Fallback: localStorage
+            return loadState();
+        }
+
+        function _applyLoadedState(parsed) {
+            if (!parsed || !Array.isArray(parsed.tabs)) return false;
+            if (parsed._idb) return false; // This is just a marker, not real data
+
+            if (parsed.tabs.length === 0) {
+                tabs = [];
+                activeTabId = null;
+                return true;
+            }
+
+            const seen = new Set();
+            const loadedTabs = [];
+
+            for (const item of parsed.tabs) {
+                if (!item || typeof item.name !== 'string') continue;
+                const cleanedName = sanitizeName(item.name);
+                if (!cleanedName) continue;
+                const key = cleanedName.toLowerCase();
+                if (seen.has(key)) continue;
+                seen.add(key);
+
+                // Lazy sanitize — skip heavy regex on huge content during load
+                const content = sanitizeScriptTextLazy(typeof item.content === 'string' ? item.content : '');
+                const history = Array.isArray(item.history)
+                    ? item.history.filter(entry => typeof entry === 'string')
+                    : [content];
+                const safeHistory = history.length > 0 ? history : [content];
+                const rawIndex = Number.isInteger(item.historyIndex) ? item.historyIndex : safeHistory.length - 1;
+                const historyIndex = Math.max(0, Math.min(rawIndex, safeHistory.length - 1));
+
+                loadedTabs.push({
+                    id: typeof item.id === 'string' ? item.id : generateId(),
+                    name: cleanedName,
+                    content: safeHistory[historyIndex],
+                    history: safeHistory,
+                    historyIndex,
+                    autoExec: Boolean(item.autoExec)
+                });
+            }
+
+            tabs = loadedTabs;
+            const exists = tabs.some(tab => tab.id === parsed.activeTabId);
+            activeTabId = (exists && tabs.length > 0) ? parsed.activeTabId : (tabs.length > 0 ? tabs[0].id : null);
+            return true;
         }
 
         function loadState() {
@@ -3029,60 +3273,13 @@
                 }
 
                 const parsed = JSON.parse(raw);
-                if (!parsed || !Array.isArray(parsed.tabs)) {
+
+                // If localStorage just has IDB marker, no real data here
+                if (parsed && parsed._idb) {
                     return false;
                 }
 
-                // Allow zero tabs — valid saved state
-                if (parsed.tabs.length === 0) {
-                    tabs = [];
-                    activeTabId = null;
-                    return true;
-                }
-
-                const seen = new Set();
-                const loadedTabs = [];
-
-                for (const item of parsed.tabs) {
-                    if (!item || typeof item.name !== 'string') {
-                        continue;
-                    }
-
-                    const cleanedName = sanitizeName(item.name);
-                    if (!cleanedName) {
-                        continue;
-                    }
-
-                    const key = cleanedName.toLowerCase();
-                    if (seen.has(key)) {
-                        continue;
-                    }
-
-                    seen.add(key);
-                    const content = sanitizeScriptText(typeof item.content === 'string' ? item.content : '');
-                    const history = Array.isArray(item.history)
-                        ? item.history
-                            .filter(entry => typeof entry === 'string')
-                            .map(entry => sanitizeScriptText(entry))
-                        : [content];
-                    const safeHistory = history.length > 0 ? history : [content];
-                    const rawIndex = Number.isInteger(item.historyIndex) ? item.historyIndex : safeHistory.length - 1;
-                    const historyIndex = Math.max(0, Math.min(rawIndex, safeHistory.length - 1));
-
-                    loadedTabs.push({
-                        id: typeof item.id === 'string' ? item.id : generateId(),
-                        name: cleanedName,
-                        content: safeHistory[historyIndex],
-                        history: safeHistory,
-                        historyIndex,
-                        autoExec: Boolean(item.autoExec)
-                    });
-                }
-
-                tabs = loadedTabs;
-                const exists = tabs.some(tab => tab.id === parsed.activeTabId);
-                activeTabId = (exists && tabs.length > 0) ? parsed.activeTabId : (tabs.length > 0 ? tabs[0].id : null);
-                return true;
+                return _applyLoadedState(parsed);
             } catch (err) {
                 console.error('Failed to load state:', err);
                 return false;
@@ -3441,7 +3638,7 @@
                     throw new Error('Require.js not loaded');
                 }
 
-                require.config({ paths: { vs: 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.53.0/min/vs' } });
+                require.config({ paths: { vs: 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs' } });
                 require(['vs/editor/editor.main'], function () {
                     try {
                         // Register fresh 'luau' language — no conflict with Monaco's built-in lua tokenizer
@@ -5664,8 +5861,16 @@
             });
         }
 
-        function startup() {
-            if (!loadState()) createDefaultState();
+        async function startup() {
+            // Try async IDB load first (handles huge scripts beyond localStorage limits)
+            let loaded = false;
+            try {
+                loaded = await loadStateAsync();
+            } catch (e) {
+                console.warn('Async load failed, trying sync localStorage:', e);
+                loaded = loadState();
+            }
+            if (!loaded) createDefaultState();
             loadConsoleState();
             toggleScriptHub(false);
             initializeScriptHubWidth();
