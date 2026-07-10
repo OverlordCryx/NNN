@@ -1236,7 +1236,7 @@
 
         
         #no-tab-overlay {
-            position: absolute;
+            position: fixed;
             inset: 0;
             display: none;
             flex-direction: column;
@@ -1437,14 +1437,14 @@
                         class="script-hub-label">Scripts</span></button>
             </div>
         </div>
+        <div id="no-tab-overlay">
+            <div class="no-tab-icon">⌨</div>
+            <div class="no-tab-text">No tabs open</div>
+            <div class="no-tab-sub">Click  +  in the tab bar to create a tab</div>
+        </div>
         <div class="editor-shell">
             <div class="editor-main-area">
                 <div id="monaco-editor"></div>
-                <div id="no-tab-overlay">
-                    <div class="no-tab-icon">⌨</div>
-                    <div class="no-tab-text">No tabs open</div>
-                    <div class="no-tab-sub">Click  +  in the tab bar to create a tab</div>
-                </div>
                 <div id="script-hub-panel" class="script-hub-panel">
                     <div id="script-hub-resizer" class="script-hub-resizer" aria-hidden="true"></div>
                     <div class="script-hub-top">
@@ -3287,9 +3287,17 @@
         }
 
         function createDefaultState() {
-            
-            tabs = [];
-            activeTabId = null;
+            const defaultContent = 'print("NOTHING X")';
+            const defaultTab = {
+                id: generateId(),
+                name: 'script1',
+                content: defaultContent,
+                history: [defaultContent],
+                historyIndex: 0,
+                autoExec: false
+            };
+            tabs = [defaultTab];
+            activeTabId = defaultTab.id;
         }
 
         function getNextScriptName() {
@@ -3416,6 +3424,11 @@
             
             if (noTabOverlay) {
                 noTabOverlay.classList.toggle('visible', tabs.length === 0);
+            }
+            const editorShell = document.querySelector('.editor-shell');
+            if (editorShell) {
+                editorShell.style.display = tabs.length === 0 ? 'none' : '';
+                if (editor) editor.layout();
             }
         }
 
